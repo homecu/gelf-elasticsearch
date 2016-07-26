@@ -33,7 +33,7 @@ class GelfServerProtocol(object):
 
 @shellish.autocommand
 def gelf_es_relay(elasticsearch_url, listen_addr='0.0.0.0', listen_port=12201,
-                  verbose=False):
+                  verbose=False, es_conn_limit=100):
     """ A Gelf server relay to elasticsearch.
 
     The URL should contain the /index/type args as per the elasticsearch API.
@@ -44,7 +44,8 @@ def gelf_es_relay(elasticsearch_url, listen_addr='0.0.0.0', listen_port=12201,
     listen = loop.create_datagram_endpoint(GelfServerProtocol, local_addr=addr)
     transport, protocol = loop.run_until_complete(listen)
     protocol.verbose = verbose
-    protocol.es_session = aiohttp.ClientSession(loop=loop)
+    conn = aiohttp.TCPConnector(limit=es_conn_limit)
+    protocol.es_session = aiohttp.ClientSession(loop=loop, connector=conn)
     protocol.es_url = elasticsearch_url
     try:
         loop.run_forever()
