@@ -21,7 +21,7 @@ class GelfServerProtocol(object):
         log['timestamp'] = dt.isoformat()
         log['message'] = log['short_message']
         del log['short_message']
-        log['host_ip'] = addr[0]
+        log['host_addr'] = addr[0]
         if self.verbose:
             shellish.vtmlprint('<b>LOG:<b>', log)
         asyncio.ensure_future(self.relaylog(log))
