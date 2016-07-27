@@ -2,6 +2,7 @@
 
 import aiohttp
 import asyncio
+import datetime
 import gzip
 import json
 import shellish
@@ -16,12 +17,16 @@ class GelfServerProtocol(object):
 
     def datagram_received(self, data, addr):
         log = json.loads(gzip.decompress(data).decode())
+        dt = datetime.datetime.utcfromtimestamp(log['timestamp'])
+        log['timestamp'] = dt.isoformat()
+        log['message'] = log['short_message']
+        del log['short_message']
+        log['host_ip'] = addr[0]
         if self.verbose:
             shellish.vtmlprint('<b>LOG:<b>', log)
         asyncio.ensure_future(self.relaylog(log))
 
     async def relaylog(self, log):
-        log['timestamp'] = round(log['timestamp'] * 1000)
         data = json.dumps(log)
         with aiohttp.Timeout(60):
             async with self.es_session.post(self.es_url, data=data) as r:
