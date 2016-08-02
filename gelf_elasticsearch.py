@@ -28,12 +28,16 @@ class GelfServerProtocol(object):
 
     async def relaylog(self, log):
         data = json.dumps(log)
-        with aiohttp.Timeout(60):
-            async with self.es_session.post(self.es_url, data=data) as r:
-                if r.status != 201:
-                    raise Exception(await r.text())
-                if self.verbose:
-                    shellish.vtmlprint('<b>ES INDEX:</b>', await r.text())
+        try:
+            with aiohttp.Timeout(60):
+                async with self.es_session.post(self.es_url, data=data) as r:
+                    if r.status != 201:
+                        shellish.vtmlprint('<b><red>ES POST ERROR:</red> %s</b>' %
+                                           (await r.text()))
+                    elif self.verbose:
+                        shellish.vtmlprint('<b>ES INDEX:</b>', await r.text())
+        except asyncio.TimeoutError:
+            shellish.vtmlprint('<b><red>ES POST TIMEOUT</red></b>')
 
 
 @shellish.autocommand
