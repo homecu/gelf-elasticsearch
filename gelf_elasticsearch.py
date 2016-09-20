@@ -5,12 +5,18 @@ import asyncio
 import datetime
 import gzip
 import json
+import logging.handlers
+import re
 import shellish
 
+_prio_names = logging.handlers.SysLogHandler.priority_names
+log_level_map = dict(map(reversed, _prio_names.items()))
 loop = asyncio.get_event_loop()
 
 
 class GelfServerProtocol(object):
+
+    image_re = re.compile('((?P<repo>.*?)/)?(?P<tag>[^:]*)(:(?P<version>.*))?')
 
     def connection_made(self, transport):
         pass
@@ -18,13 +24,27 @@ class GelfServerProtocol(object):
     def datagram_received(self, data, addr):
         log = json.loads(gzip.decompress(data).decode())
         dt = datetime.datetime.utcfromtimestamp(log['timestamp'])
-        log['timestamp'] = dt.isoformat()
-        log['message'] = log['short_message']
-        del log['short_message']
-        log['host_addr'] = addr[0]
+        image_info = self.image_re.match(log['_image_name']).groupdict()
+        record = {
+            "command": log['_command'],
+            "container_created": log['_created'],
+            "container_id": log['_container_id'],
+            "container_name": log['_container_name'],
+            "host": self.instance_id,
+            "host_addr": self.instance_ip,
+            "image_id": log['_image_id'],
+            "image_name": log['_image_name'],
+            "image_repo": image_info['repo'] or '',
+            "image_tag": image_info['tag'],
+            "image_version": image_info['version'] or 'latest',
+            "level": log_level_map[log['level']],
+            "message": log['short_message'],
+            "tag": log['_tag'],
+            "timestamp": dt.isoformat(),
+        }
         if self.verbose:
-            shellish.vtmlprint('<b>LOG:<b>', log)
-        asyncio.ensure_future(self.relaylog(log))
+            shellish.vtmlprint('<b>LOG RECORD:<b>', record)
+        asyncio.ensure_future(self.relaylog(record))
 
     async def relaylog(self, log):
         data = json.dumps(log)
@@ -42,7 +62,8 @@ class GelfServerProtocol(object):
 
 @shellish.autocommand
 def gelf_es_relay(elasticsearch_url, listen_addr='0.0.0.0', listen_port=12201,
-                  verbose=False, es_conn_limit=100):
+                  verbose=False, es_conn_limit=100, instance_id=None,
+                  instance_ip=None):
     """ A Gelf server relay to elasticsearch.
 
     The URL should contain the /index/type args as per the elasticsearch API.
@@ -56,6 +77,8 @@ def gelf_es_relay(elasticsearch_url, listen_addr='0.0.0.0', listen_port=12201,
     conn = aiohttp.TCPConnector(limit=es_conn_limit)
     protocol.es_session = aiohttp.ClientSession(loop=loop, connector=conn)
     protocol.es_url = elasticsearch_url
+    protocol.instance_id = instance_id
+    protocol.instance_ip = instance_ip
     try:
         loop.run_forever()
     except KeyboardInterrupt:
