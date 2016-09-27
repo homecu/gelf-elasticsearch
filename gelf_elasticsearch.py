@@ -23,7 +23,7 @@ class GelfServerProtocol(object):
 
     def datagram_received(self, data, addr):
         log = json.loads(gzip.decompress(data).decode())
-        dt = datetime.datetime.utcfromtimestamp(log['timestamp'])
+        ts = datetime.datetime.utcfromtimestamp(log['timestamp'])
         image_info = self.image_re.match(log['_image_name']).groupdict()
         record = {
             "command": log['_command'],
@@ -40,17 +40,19 @@ class GelfServerProtocol(object):
             "level": log_level_map[log['level']],
             "message": log['short_message'],
             "tag": log['_tag'],
-            "timestamp": dt.isoformat(),
+            "timestamp": ts.isoformat(),
         }
         if self.verbose:
             shellish.vtmlprint('<b>LOG RECORD:<b>', record)
-        asyncio.ensure_future(self.relaylog(record))
+        asyncio.ensure_future(self.relaylog(record, ts))
 
-    async def relaylog(self, log):
+    async def relaylog(self, log, ts):
         data = json.dumps(log)
+        url = '%s/%s-%s/%s' % (self.es_url, self.es_index,
+                               ts.strftime('%Y-%m-%d'), self.es_type)
         try:
             with aiohttp.Timeout(60):
-                async with self.es_session.post(self.es_url, data=data) as r:
+                async with self.es_session.post(url, data=data) as r:
                     if r.status != 201:
                         shellish.vtmlprint('<b><red>ES POST ERROR:</red> %s</b>' %
                                            (await r.text()))
@@ -61,22 +63,22 @@ class GelfServerProtocol(object):
 
 
 @shellish.autocommand
-def gelf_es_relay(elasticsearch_url, listen_addr='0.0.0.0', listen_port=12201,
-                  verbose=False, es_conn_limit=100, instance_id=None,
-                  instance_ip=None):
+def gelf_es_relay(elasticsearch_url, es_index='logging', es_type='docker',
+                  listen_addr='0.0.0.0', listen_port=12201, verbose=False,
+                  es_conn_limit=100, instance_id=None, instance_ip=None):
     """ A Gelf server relay to elasticsearch.
 
-    The URL should contain the /index/type args as per the elasticsearch API.
-
-    E.g. https://elasticsearch/logs/docker
-    """
+    The URL should just be the scheme://host:port/ without any index or type.
+    The index will be modified to include a UTC date suffix. """
     addr = listen_addr, listen_port
     listen = loop.create_datagram_endpoint(GelfServerProtocol, local_addr=addr)
     transport, protocol = loop.run_until_complete(listen)
     protocol.verbose = verbose
     conn = aiohttp.TCPConnector(limit=es_conn_limit)
     protocol.es_session = aiohttp.ClientSession(loop=loop, connector=conn)
-    protocol.es_url = elasticsearch_url
+    protocol.es_url = elasticsearch_url.rstrip('/')
+    protocol.es_index = es_index
+    protocol.es_type = es_type
     protocol.instance_id = instance_id
     protocol.instance_ip = instance_ip
     try:
