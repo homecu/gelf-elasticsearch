@@ -1,4 +1,4 @@
-FROM jmayfield/shellish
+FROM jmayfield/shellish:v4.1
 RUN pip install aiohttp
 COPY . src
 WORKDIR src

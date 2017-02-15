@@ -6,17 +6,24 @@ import datetime
 import gzip
 import json
 import logging.handlers
+import random
 import re
-import shellish
+import shellish.logging
+
+root_logger = logging.getLogger()
+root_logger.addHandler(shellish.logging.VTMLHandler())
+logger = logging.getLogger('relay')
 
 _prio_names = logging.handlers.SysLogHandler.priority_names
 log_level_map = dict(map(reversed, _prio_names.items()))
 loop = asyncio.get_event_loop()
+loop.set_debug(True)
 
 
 class GelfServerProtocol(object):
 
     image_re = re.compile('((?P<repo>.*?)/)?(?P<tag>[^:]*)(:(?P<version>.*))?')
+    attempts = 3
 
     def connection_made(self, transport):
         pass
@@ -42,45 +49,80 @@ class GelfServerProtocol(object):
             "tag": log['_tag'],
             "timestamp": ts.isoformat(),
         }
-        if self.verbose:
-            shellish.vtmlprint('<b>LOG RECORD:<b>', record)
-        asyncio.ensure_future(self.relaylog(record, ts))
+        loop.create_task(self.relaylog(record, ts))
 
     async def relaylog(self, log, ts):
         data = json.dumps(log)
         url = '%s/%s-%s/%s' % (self.es_url, self.es_index,
                                ts.strftime('%Y-%m-%d'), self.es_type)
+        for retry in range(self.attempts + 1):
+            if retry:
+                logger.warning('Retry attempt %d/%d' % (retry, self.attempts))
+            try:
+                await self._relaylog(data, url)
+            except asyncio.TimeoutError:
+                logger.warning('ES Timeout')
+            except IOError as e:
+                logger.error('ES Error: %s' % e)
+            except Exception:
+                logger.exception('ES Exception')
+            else:
+                return
+            await self.close_es_session()
+            await asyncio.sleep(random.random() * 120)
+        logger.error("Dropping message: %s" % log)
+
+    async def _relaylog(self, data, url):
+        es = self.get_es_session()
+        with aiohttp.Timeout(60):
+            async with es.post(url, data=data) as r:
+                if r.status != 201:
+                    raise IOError(await r.text())
+                else:
+                    if self.verbose:
+                        logger.info('ES INDEX: %s', await r.text())
+
+    def get_es_session(self):
         try:
-            with aiohttp.Timeout(60):
-                async with self.es_session.post(url, data=data) as r:
-                    if r.status != 201:
-                        shellish.vtmlprint('<b><red>ES POST ERROR:</red> %s</b>' %
-                                           (await r.text()))
-                    elif self.verbose:
-                        shellish.vtmlprint('<b>ES INDEX:</b>', await r.text())
-        except asyncio.TimeoutError:
-            shellish.vtmlprint('<b><red>ES POST TIMEOUT</red></b>')
+            return self._es_session
+        except AttributeError:
+            logging.info("Starting new ES session: %s" % self.es_url)
+            conn = aiohttp.TCPConnector(limit=self.es_conn_limit)
+            self._es_session = s = aiohttp.ClientSession(loop=loop,
+                                                         connector=conn)
+            return s
+
+    async def close_es_session(self):
+        try:
+            session = self._es_session
+        except AttributeError:
+            return
+        del self._es_session
+        logging.warning("Closing ES session")
+        await session.close()
 
 
 @shellish.autocommand
 def gelf_es_relay(elasticsearch_url, es_index='logging', es_type='docker',
                   listen_addr='0.0.0.0', listen_port=12201, verbose=False,
-                  es_conn_limit=100, instance_id=None, instance_ip=None):
+                  es_conn_limit=100, instance_id=None, instance_ip=None,
+                  log_level='info'):
     """ A Gelf server relay to elasticsearch.
 
     The URL should just be the scheme://host:port/ without any index or type.
     The index will be modified to include a UTC date suffix. """
+    root_logger.setLevel(log_level.upper())
     addr = listen_addr, listen_port
     listen = loop.create_datagram_endpoint(GelfServerProtocol, local_addr=addr)
     transport, protocol = loop.run_until_complete(listen)
     protocol.verbose = verbose
-    conn = aiohttp.TCPConnector(limit=es_conn_limit)
-    protocol.es_session = aiohttp.ClientSession(loop=loop, connector=conn)
     protocol.es_url = elasticsearch_url.rstrip('/')
     protocol.es_index = es_index
     protocol.es_type = es_type
+    protocol.es_conn_limit = es_conn_limit
     protocol.instance_id = instance_id
     protocol.instance_ip = instance_ip
+    logger.info("Starting GELF ES Relay: %s" % elasticsearch_url)
     try:
         loop.run_forever()
     except KeyboardInterrupt:
