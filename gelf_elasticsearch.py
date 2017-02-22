@@ -4,6 +4,7 @@ import aiohttp
 import asyncio
 import datetime
 import gzip
+import itertools
 import json
 import logging.handlers
 import random
@@ -24,6 +25,7 @@ class GelfServerProtocol(object):
 
     image_re = re.compile('((?P<repo>.*?)/)?(?P<tag>[^:]*)(:(?P<version>.*))?')
     attempts = 3
+    identer = itertools.count()
 
     def connection_made(self, transport):
         pass
@@ -52,27 +54,31 @@ class GelfServerProtocol(object):
         loop.create_task(self.relaylog(record, ts))
 
     async def relaylog(self, log, ts):
+        ident = next(self.identer)
         data = json.dumps(log)
         url = '%s/%s-%s/%s' % (self.es_url, self.es_index,
                                ts.strftime('%Y-%m-%d'), self.es_type)
-        for retry in range(self.attempts + 1):
-            if retry:
-                logger.warning('Retry attempt %d/%d' % (retry, self.attempts))
+        for retry in range(self.attempts):
             try:
-                await self._relaylog(data, url)
+                await self._relaylog(data, url, ident)
             except asyncio.TimeoutError:
-                logger.warning('ES Timeout')
+                logger.warning('ES Timeout [%d]' % ident)
             except IOError as e:
-                logger.error('ES Error: %s' % e)
+                logger.error('ES Error [%d]: %s' % (ident, e))
             except Exception:
-                logger.exception('ES Exception')
+                logger.exception('ES Exception [%d]' % ident)
             else:
                 return
+            # Only Failures...
             await self.close_es_session()
-            await asyncio.sleep(random.random() * 120)
-        logger.error("Dropping message: %s" % log)
+            backoff = random.random() * 12
+            logger.warning("Will retry message %d in %g seconds." % (ident,
+                           backoff))
+            await asyncio.sleep(backoff)
+        logger.error("Dropped message %d after %d attempts." % (ident,
+                     self.attempts))
 
-    async def _relaylog(self, data, url):
+    async def _relaylog(self, data, url, ident):
         es = self.get_es_session()
         with aiohttp.Timeout(60):
             async with es.post(url, data=data) as r:
@@ -80,7 +86,8 @@ class GelfServerProtocol(object):
                     raise IOError(await r.text())
                 else:
                     if self.verbose:
-                        logger.info('ES INDEX: %s', await r.text())
+                        logger.info('SUCCESS [%d]: %s' % (ident,
+                                    await r.text()))
 
     def get_es_session(self):
         try:
