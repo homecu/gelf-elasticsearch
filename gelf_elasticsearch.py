@@ -18,7 +18,6 @@ logger = logging.getLogger('relay')
 _prio_names = logging.handlers.SysLogHandler.priority_names
 log_level_map = dict(map(reversed, _prio_names.items()))
 loop = asyncio.get_event_loop()
-loop.set_debug(True)
 
 
 class GelfServerProtocol(object):
